@@ -505,6 +505,9 @@ async function main() {
 
       gamesToDownload++;
 
+      const MAX_RETRIES = 60*60*24; // 24 hours worth of retries
+      const RETRY_DELAY_MS = 1000; // 1 second delay between retries
+
       for (const item of gameDetails.installers) {
         const folderName = item.gameTitle.replace(/[/\\?%*:|"<>]/g, '');
         const targetDir = path.join(downloadDir, folderName);
@@ -523,8 +526,28 @@ async function main() {
 
         const filePath = path.join(targetDir, fileName);
 
-        console.log(`[${item.gameTitle}] -> ${fileName}`);
-        await downloadFileWithResume(item.manualUrl, filePath, accessToken);
+        let retries = 0;
+        let downloadSuccess = false;
+        while (retries < MAX_RETRIES && !downloadSuccess) {
+          try {
+            console.log(`[${item.gameTitle}] -> ${fileName}`);
+            await downloadFileWithResume(item.manualUrl, filePath, accessToken);
+            downloadSuccess = true; // Success, exit retry loop
+          } catch (err) {
+            // Check for common network-related error codes
+            const isNetworkError = err.cause && ['ENOTFOUND', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN'].includes(err.cause.code);
+            if (isNetworkError) {
+              retries++;
+              console.warn(`\n  Download failed due to network error (${err.message}). Retrying in ${RETRY_DELAY_MS / 1000}s... (${retries}/${MAX_RETRIES})`);
+              await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+            } else {
+              throw err; // Not a retriable network error, re-throw it
+            }
+          }
+        }
+        if (!downloadSuccess) {
+          throw new Error(`Download for ${fileName} failed after ${MAX_RETRIES} retries.`);
+        }
       }
     }
     if (gamesToDownload > 0) {
