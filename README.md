@@ -1,0 +1,61 @@
+# GOG Offline Backup Script
+
+A Node.js command-line script to download your GOG.com game library for offline backup. It provides a range of features to make managing and downloading your games efficient and user-friendly.
+
+## Features
+
+*   **Secure Authentication:**
+    *   Interactive, browser-based login for the first run.
+    *   Automatic token refresh for subsequent sessions.
+    *   Securely stores authentication tokens locally in `tokens.json`.
+
+*   **Intelligent Downloading:**
+    *   **Resumable Downloads:** Automatically resumes interrupted downloads from where they left off.
+    *   **Skips Completed Games:** Intelligently checks for existing files and their sizes to skip games that are already fully downloaded.
+    *   **Robust Filename Detection:** Ensures correct filenames and extensions by checking API metadata, `Content-Disposition` headers, and download URLs.
+    *   **Organized Structure:** Saves each game's installers into its own dedicated folder (e.g., `./gog_offline_backup/The Witcher 3 Wild Hunt/`).
+
+*   **Powerful Filtering:**
+    *   **Filter by Tags:** Interactively prompts you to enter tags (e.g., `RPG, Action`) to download only specific games.
+    *   Lists all available tags from your library for easy reference.
+
+*   **User-Friendly Configuration:**
+    *   **Interactive Setup:** Prompts for the download directory and filter tags on run.
+    *   **Persistent Settings:** Remembers your last-used download directory and tags in `config.json` for convenience.
+
+*   **Detailed Console Output:**
+    *   Real-time progress bar for each download, including speed, percentage, and ETA.
+    *   Clear status messages for authentication, filtering, and completed downloads.
+
+## Prerequisites
+
+*   Node.js (v18 or later is recommended).
+
+## Setup
+
+1.  Save the script as `index.js` in a new folder.
+2.  Open a terminal or command prompt in that folder.
+3.  The script uses only built-in Node.js modules, so no `npm install` is required.
+
+## Usage
+
+Run the script from your terminal:
+```sh
+node index.js
+```
+
+### First Run
+1.  The script will ask you to open a URL in your browser to log into your GOG account.
+2.  After logging in, you will be redirected to a page with a `code=` parameter in the URL.
+3.  Copy the entire URL and paste it back into the terminal.
+4.  The script will then prompt you to enter a download directory and optional tags for filtering.
+
+### Subsequent Runs
+The script will automatically use your saved authentication token. It will prompt you for the download directory and tags, using your previously saved choices as the default.
+
+## Configuration Files
+
+The script will create two files in the same directory:
+
+*   `tokens.json`: Stores your authentication and refresh tokens so you don't have to log in every time. **Do not share this file.**
+*   `config.json`: Stores your preferred download directory and filter tags. You can edit this file manually if you wish.
