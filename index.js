@@ -395,33 +395,6 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
 }
 
 /**
- * Determines the most likely final filename for a download item.
- * This function is crucial for both checking existing files and for saving new ones.
- */
-function getFinalFilename(item) {
-  let finalName = item.name;
-
-  // 1. If the API-provided name lacks an extension, try to get a better one from the URL.
-  if (!path.extname(finalName)) {
-    const urlSegments = item.manualUrl.split('/');
-    const nameFromUrl = urlSegments[urlSegments.length - 1];
-    // Use the name from the URL only if it seems valid (has an extension).
-    if (nameFromUrl && path.extname(nameFromUrl)) {
-      finalName = nameFromUrl;
-    }
-  }
-
-  // 2. If it still lacks an extension, apply the platform-specific fallback.
-  if (!path.extname(finalName) && TARGET_PLATFORM === 'windows') {
-    finalName += '.exe';
-  }
-
-  // 3. Sanitize the name to remove invalid characters.
-  finalName = finalName.replace(/[/\\?%*:|"<>]/g, '_');
-  return finalName;
-}
-
-/**
  * Fetch available user tags from GOG
  */
 async function fetchAvailableTags(accessToken) {
@@ -499,10 +472,6 @@ async function main() {
         }
       }
 
-      // Pre-process installers to determine their final filenames before checking existence.
-      const installersWithFinalNames = gameDetails.installers.map(installer => {
-        return { ...installer, finalName: getFinalFilename(installer) };
-      });
 
       // Check if game is already fully downloaded
       const gameFolderName = gameDetails.title.replace(/[/\\?%*:|"<>]/g, '');
@@ -510,19 +479,20 @@ async function main() {
       if (fs.existsSync(gameDir)) {
         let isComplete = true;
         const existingFiles = new Map(
-          fs.readdirSync(gameDir).map(f => {
+          fs.readdirSync(gameDir, { withFileTypes: true }).filter(f => f.isFile()).map(f => {
             try {
-              return [f, fs.statSync(path.join(gameDir, f)).size];
+              return [f.name, fs.statSync(path.join(gameDir, f.name)).size];
             } catch {
-              return [f, -1]; // Handle cases where stat might fail
+              return [f.name, -1]; // Handle cases where stat might fail
             }
           })
         );
 
-        for (const installer of installersWithFinalNames) {
+        for (const installer of gameDetails.installers) {
           const expectedSize = parseSizeToBytes(installer.size);
-          const existingSize = existingFiles.get(installer.finalName);
-          if (existingSize === undefined || existingSize < expectedSize) {
+          // Check if any file has the correct size. This is more reliable than checking names.
+          const fileExists = Array.from(existingFiles.values()).includes(expectedSize);
+          if (!fileExists) {
             isComplete = false;
             break;
           }
@@ -535,12 +505,22 @@ async function main() {
 
       gamesToDownload++;
 
-      for (const item of installersWithFinalNames) {
+      for (const item of gameDetails.installers) {
         const folderName = item.gameTitle.replace(/[/\\?%*:|"<>]/g, '');
         const targetDir = path.join(downloadDir, folderName);
         fs.mkdirSync(targetDir, { recursive: true });
 
-        const fileName = getFinalFilename(item); // Use the consistent function here as well
+        // Determine a temporary, safe filename. The post-download logic will correct it.
+        let fileName = item.name;
+        if (!path.extname(fileName)) {
+          const urlSegments = item.manualUrl.split('/');
+          const nameFromUrl = urlSegments[urlSegments.length - 1];
+          if (nameFromUrl && path.extname(nameFromUrl)) {
+            fileName = nameFromUrl;
+          }
+        }
+        fileName = fileName.replace(/[/\\?%*:|"<>]/g, '_');
+
         const filePath = path.join(targetDir, fileName);
 
         console.log(`[${item.gameTitle}] -> ${fileName}`);
