@@ -365,32 +365,27 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
   process.stdout.write('\n');
 
   // Post-download check: Rename file if the final URL has a better name
-  let finalPath = savePath;
-  if (!path.extname(finalPath)) {
-    let newName = null;
-    const contentDisposition = res.headers.get('content-disposition');
-    // 1. Try to get name from Content-Disposition header
-    if (contentDisposition) {
-      const match = contentDisposition.match(/filename\*?=['"]?([^'"]+)['"]?/);
-      if (match && match[1]) {
-        newName = decodeURIComponent(match[1]);
-      }
+  let newName = null;
+  const contentDisposition = res.headers.get('content-disposition');
+  // 1. Always prioritize the Content-Disposition header. It's the most reliable source.
+  if (contentDisposition) {
+    const match = contentDisposition.match(/filename\*?=['"]?([^'"]+)['"]?/);
+    if (match && match[1]) {
+      newName = decodeURIComponent(match[1]);
     }
-    // 2. Fallback to final URL path
-    if (!newName) {
-      const urlPath = new URL(finalUrl).pathname;
-      newName = path.basename(urlPath);
-    }
-    // 3. If still no extension, assume .exe for Windows platform
-    if (newName && !path.extname(newName) && TARGET_PLATFORM === 'windows') {
-      newName += '.exe';
-    }
-    // 4. Rename the file if we found a better name
-    if (newName && newName !== path.basename(finalPath)) {
-      const newPath = path.join(path.dirname(finalPath), newName);
-      fs.renameSync(finalPath, newPath);
-      console.log(`  File renamed to ${newName}`);
-    }
+  }
+  // 2. If no header, fall back to the final URL path.
+  if (!newName) {
+    const urlPath = new URL(finalUrl).pathname;
+    newName = path.basename(urlPath);
+  }
+  // 3. If we found a better name that is different from the current one, rename the file.
+  if (newName && newName !== path.basename(savePath)) {
+    const newPath = path.join(path.dirname(savePath), newName);
+    // Ensure the target path doesn't already exist, or handle it.
+    // For simplicity, we'll just rename. If this causes issues, we might need to delete the target first.
+    fs.renameSync(savePath, newPath);
+    console.log(`  File renamed to ${newName}`);
   }
 }
 
