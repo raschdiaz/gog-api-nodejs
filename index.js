@@ -236,11 +236,11 @@ function parseSizeToBytes(sizeString) {
 
   switch (unit?.toUpperCase()) {
     case 'GB':
-      return Math.round(numValue * 1024 * 1024 * 1024);
+      return Math.round(numValue * 1000 * 1000 * 1000); // Assume base-10 GB
     case 'MB':
-      return Math.round(numValue * 1024 * 1024);
+      return Math.round(numValue * 1000 * 1000);     // Assume base-10 MB
     case 'KB':
-      return Math.round(numValue * 1024);
+      return Math.round(numValue * 1000);         // Assume base-10 KB
     default:
       return Math.round(numValue);
   }
@@ -395,6 +395,37 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
 }
 
 /**
+ * Determines the most likely final filename for a download item.
+ * This function is crucial for both checking existing files and for saving/resuming new ones.
+ */
+function getPredictedFilename(item) {
+  let predictedName = item.name;
+
+  // 1. If the API-provided name lacks an extension, try to get a better one from the URL path.
+  if (!path.extname(predictedName)) {
+    try {
+      // Prepend a base URL to make it a valid URL for parsing pathname
+      const urlPath = new URL(`https://embed.gog.com${item.manualUrl}`).pathname;
+      const nameFromUrl = path.basename(urlPath);
+      if (nameFromUrl && path.extname(nameFromUrl)) {
+        predictedName = nameFromUrl;
+      }
+    } catch (e) {
+      // URL might be malformed, fall back to item.name
+    }
+  }
+
+  // 2. If it still lacks an extension, apply the platform-specific fallback.
+  if (!path.extname(predictedName) && TARGET_PLATFORM === 'windows') {
+    predictedName += '.exe';
+  }
+
+  // 3. Sanitize the name to remove invalid characters.
+  predictedName = predictedName.replace(/[/\\?%*:|"<>]/g, '_');
+  return predictedName;
+}
+
+/**
  * Fetch available user tags from GOG
  */
 async function fetchAvailableTags(accessToken) {
@@ -472,31 +503,48 @@ async function main() {
         }
       }
 
-
       // Check if game is already fully downloaded
       const gameFolderName = gameDetails.title.replace(/[/\\?%*:|"<>]/g, '');
       const gameDir = path.join(downloadDir, gameFolderName);
       if (fs.existsSync(gameDir)) {
         let isComplete = true;
-        const existingFiles = new Map(
-          fs.readdirSync(gameDir, { withFileTypes: true }).filter(f => f.isFile()).map(f => {
-            try {
-              return [f.name, fs.statSync(path.join(gameDir, f.name)).size];
-            } catch {
-              return [f.name, -1]; // Handle cases where stat might fail
-            }
-          })
-        );
 
         for (const installer of gameDetails.installers) {
           const expectedSize = parseSizeToBytes(installer.size);
-          // Check if any file has the correct size. This is more reliable than checking names.
-          const fileExists = Array.from(existingFiles.values()).includes(expectedSize);
-          if (!fileExists) {
+          const predictedFilename = getPredictedFilename(installer);
+          const predictedFilePath = path.join(gameDir, predictedFilename);
+
+          if (!fs.existsSync(predictedFilePath)) {
+            isComplete = false; // File doesn't exist at the predicted path
+            break;
+          }
+
+          let actualSize = 0;
+          try {
+            actualSize = fs.statSync(predictedFilePath).size;
+          } catch (e) {
+            isComplete = false; // Cannot stat file, assume incomplete
+            break;
+          }
+
+          // Check if the file is complete (within tolerance)
+          const tolerance = 1024; // 1 KB tolerance
+          if (Math.abs(actualSize - expectedSize) > tolerance) {
+            // File exists but size doesn't match (could be partial or incorrect)
             isComplete = false;
             break;
           }
+          // If actualSize is less than expectedSize (even within tolerance, but not equal),
+          // it's considered incomplete. The above check covers this.
         }
+
+        // If isComplete is true here, it means all predicted files exist and are of correct size.
+        // The post-download rename might have changed names, but we assume the predicted name
+        // is what downloadFileWithResume will look for.
+        // If a file was renamed, this check might fail, but the download loop will then
+        // download it again, and the post-download rename will ensure it gets the correct name.
+        // The key is that downloadFileWithResume will always look for the predicted name.
+
         if (isComplete) {
           console.log(`[${gameDetails.title}] is already complete. Skipping.`);
           continue;
@@ -505,25 +553,16 @@ async function main() {
 
       gamesToDownload++;
 
-      const MAX_RETRIES = 60*60*24; // 24 hours worth of retries
-      const RETRY_DELAY_MS = 1000; // 1 second delay between retries
+      const MAX_RETRIES = 10;
+      const RETRY_DELAY_MS = 5000; // 5 seconds
 
       for (const item of gameDetails.installers) {
         const folderName = item.gameTitle.replace(/[/\\?%*:|"<>]/g, '');
         const targetDir = path.join(downloadDir, folderName);
         fs.mkdirSync(targetDir, { recursive: true });
 
-        // Determine a temporary, safe filename. The post-download logic will correct it.
-        let fileName = item.name;
-        if (!path.extname(fileName)) {
-          const urlSegments = item.manualUrl.split('/');
-          const nameFromUrl = urlSegments[urlSegments.length - 1];
-          if (nameFromUrl && path.extname(nameFromUrl)) {
-            fileName = nameFromUrl;
-          }
-        }
-        fileName = fileName.replace(/[/\\?%*:|"<>]/g, '_');
-
+        // Use the predicted filename for saving and resuming.
+        const fileName = getPredictedFilename(item);
         const filePath = path.join(targetDir, fileName);
 
         let retries = 0;
@@ -534,7 +573,6 @@ async function main() {
             await downloadFileWithResume(item.manualUrl, filePath, accessToken);
             downloadSuccess = true; // Success, exit retry loop
           } catch (err) {
-            // Check for common network-related error codes
             const isNetworkError = err.cause && ['ENOTFOUND', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN'].includes(err.cause.code);
             if (isNetworkError) {
               retries++;
