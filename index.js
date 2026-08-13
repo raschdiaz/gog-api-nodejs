@@ -592,7 +592,10 @@ async function main() {
       const MAX_RETRIES = 10;
       const RETRY_DELAY_MS = 5000; // 5 seconds
 
+      let installerIndex = 0;
       for (const item of gameDetails.installers) {
+        installerIndex++;
+        const totalInstallers = gameDetails.installers.length;
         const folderName = item.gameTitle.replace(/[/\\?%*:|"<>]/g, '');
         const targetDir = path.join(downloadDir, folderName);
         fs.mkdirSync(targetDir, { recursive: true });
@@ -605,7 +608,7 @@ async function main() {
         let downloadSuccess = false;
         while (retries < MAX_RETRIES && !downloadSuccess) {
           try {
-            console.log(`[${item.gameTitle}] -> ${fileName}`);
+            console.log(`[${item.gameTitle}] (${installerIndex}/${totalInstallers}) -> ${fileName}`);
             await downloadFileWithResume(item.manualUrl, filePath, accessToken);
             downloadSuccess = true; // Success, exit retry loop
           } catch (err) {
