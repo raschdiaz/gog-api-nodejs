@@ -234,13 +234,14 @@ function parseSizeToBytes(sizeString) {
   const numValue = parseFloat(value);
   if (isNaN(numValue)) return 0;
 
+  const k = 1024;
   switch (unit?.toUpperCase()) {
     case 'GB':
-      return Math.round(numValue * 1000 * 1000 * 1000); // Assume base-10 GB
+      return Math.round(numValue * k * k * k); // Use base-2 (GiB)
     case 'MB':
-      return Math.round(numValue * 1000 * 1000);     // Assume base-10 MB
+      return Math.round(numValue * k * k);     // Use base-2 (MiB)
     case 'KB':
-      return Math.round(numValue * 1000);         // Assume base-10 KB
+      return Math.round(numValue * k);         // Use base-2 (KiB)
     default:
       return Math.round(numValue);
   }
@@ -393,24 +394,47 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
  * Determines the most likely final filename for a download item.
  * This function is crucial for both checking existing files and for saving/resuming new ones.
  */
-function getPredictedFilename(item) {
+async function getPredictedFilename(item, accessToken) {
   let predictedName = item.name;
 
-  // 1. If the API-provided name lacks an extension, try to get a better one from the URL path.
+  // 1. Fetch headers to check for Content-Disposition, which is the most reliable source.
+  try {
+    const res = await fetch(`https://embed.gog.com${item.manualUrl}`, {
+      method: 'HEAD',
+      headers: getHeaders(accessToken),
+      redirect: 'follow'
+    });
+
+    if (res.ok) {
+      const contentDisposition = res.headers.get('content-disposition');
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename\*?=['"]?([^'"]+)['"]?/);
+        if (match && match[1]) {
+          predictedName = decodeURIComponent(match[1]);
+        }
+      }
+      // If no Content-Disposition, use the final URL after redirects
+      if (predictedName === item.name) {
+        const urlPath = new URL(res.url).pathname;
+        predictedName = path.basename(urlPath);
+      }
+    }
+  } catch (e) {
+    // If HEAD request fails, fall back to less reliable methods
+  }
+
+  // 2. If the name (from API or HEAD request) lacks an extension, try the original URL path.
   if (!path.extname(predictedName)) {
     try {
-      // Prepend a base URL to make it a valid URL for parsing pathname
       const urlPath = new URL(`https://embed.gog.com${item.manualUrl}`).pathname;
       const nameFromUrl = path.basename(urlPath);
       if (nameFromUrl && path.extname(nameFromUrl)) {
         predictedName = nameFromUrl;
       }
-    } catch (e) {
-      // URL might be malformed, fall back to item.name
-    }
+    } catch (e) {/* Ignore malformed URL */}
   }
 
-  // 2. If it still lacks an extension, apply the platform-specific fallback.
+  // 3. If it still lacks an extension, apply the platform-specific fallback.
   if (!path.extname(predictedName) && TARGET_PLATFORM === 'windows') {
     predictedName += '.exe';
   }
@@ -447,6 +471,15 @@ async function main() {
     const lastDownloadDir = config.downloadDir || DEFAULT_DOWNLOAD_DIR;
     const lastTags = config.tags || [];
 
+    // Backward compatibility: migrate 'completedGames' to 'downloadedGames'
+    if (config.completedGames && !config.downloadedGames) {
+      console.log('[Config] Migrating "completedGames" to "downloadedGames" in config.json...');
+      config.downloadedGames = config.completedGames;
+      delete config.completedGames;
+      saveConfig(config);
+    }
+    const downloadedGames = new Set(config.downloadedGames || []); // Use a Set for efficient lookups
+    
     const availableTags = await fetchAvailableTags(accessToken);
     if (availableTags.length > 0) {
       console.log('\nAvailable tags in your library:');
@@ -488,6 +521,12 @@ async function main() {
         continue;
       }
 
+      // Check if the game is already marked as complete in config.json
+      if (downloadedGames.has(gameId)) {
+        console.log(`[${gameDetails.title}] is marked as complete in config.json. Skipping.`);
+        continue;
+      }
+
       // Filter by tags if any are specified
       if (targetTags.length > 0) {
         const gameTagsLower = gameDetails.tags.map(t => t.toLowerCase());
@@ -498,7 +537,10 @@ async function main() {
         }
       }
 
-      // Check if game is already fully downloaded
+      /*
+      // == LOGIC TO SKIP ALREADY DOWNLOADED FILES ==
+      // This block checks if a game's folder exists and if all its files are present and match the expected size.
+      // If everything matches, it skips the game. It has been commented out to force re-downloads.
       const gameFolderName = gameDetails.title.replace(/[/\\?%*:|"<>]/g, '');
       const gameDir = path.join(downloadDir, gameFolderName);
       if (fs.existsSync(gameDir)) {
@@ -506,7 +548,7 @@ async function main() {
 
         for (const installer of gameDetails.installers) {
           const expectedSize = parseSizeToBytes(installer.size);
-          const predictedFilename = getPredictedFilename(installer);
+          const predictedFilename = await getPredictedFilename(installer, accessToken);
           const predictedFilePath = path.join(gameDir, predictedFilename);
 
           if (!fs.existsSync(predictedFilePath)) {
@@ -523,21 +565,19 @@ async function main() {
           }
 
           // Check if the file is complete (within tolerance)
-          const tolerance = 1024; // 1 KB tolerance
-          if (Math.abs(actualSize - expectedSize) > tolerance) {
+          const tolerance = expectedSize * 0.001;
+          if (expectedSize > 0 && Math.abs(actualSize - expectedSize) > tolerance) {
             // File exists but size doesn't match (could be partial or incorrect)
             isComplete = false;
             break;
           }
-          // If actualSize is less than expectedSize (even within tolerance, but not equal),
-          // it's considered incomplete. The above check covers this.
         }
 
         // If isComplete is true here, it means all predicted files exist and are of correct size.
         // The post-download rename might have changed names, but we assume the predicted name
         // is what downloadFileWithResume will look for.
         // If a file was renamed, this check might fail, but the download loop will then
-        // download it again, and the post-download rename will ensure it gets the correct name.
+        // download it again, and a post-download rename will ensure it gets the correct name.
         // The key is that downloadFileWithResume will always look for the predicted name.
 
         if (isComplete) {
@@ -545,6 +585,7 @@ async function main() {
           continue;
         }
       }
+      */
 
       gamesToDownload++;
 
@@ -557,7 +598,7 @@ async function main() {
         fs.mkdirSync(targetDir, { recursive: true });
 
         // Use the predicted filename for saving and resuming.
-        const fileName = getPredictedFilename(item);
+        const fileName = await getPredictedFilename(item, accessToken);
         const filePath = path.join(targetDir, fileName);
 
         let retries = 0;
@@ -581,6 +622,13 @@ async function main() {
         if (!downloadSuccess) {
           throw new Error(`Download for ${fileName} failed after ${MAX_RETRIES} retries.`);
         }
+      }
+
+      // After all installers for the game are downloaded, mark it as complete.
+      if (gamesToDownload > 0) {
+        downloadedGames.add(gameId);
+        saveConfig({ downloadedGames: Array.from(downloadedGames) });
+        console.log(`[${gameDetails.title}] successfully downloaded and marked as complete.`);
       }
     }
     if (gamesToDownload > 0) {
