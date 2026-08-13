@@ -471,14 +471,26 @@ async function main() {
     const lastDownloadDir = config.downloadDir || DEFAULT_DOWNLOAD_DIR;
     const lastTags = config.tags || [];
 
-    // Backward compatibility: migrate 'completedGames' to 'downloadedGames'
+    // Backward compatibility: migrate 'completedGames' (array) to 'downloadedGames' (object)
     if (config.completedGames && !config.downloadedGames) {
       console.log('[Config] Migrating "completedGames" to "downloadedGames" in config.json...');
       config.downloadedGames = config.completedGames;
       delete config.completedGames;
       saveConfig(config);
     }
-    const downloadedGames = new Set(config.downloadedGames || []); // Use a Set for efficient lookups
+
+    // Data structure migration: from array of IDs to object of {id: title}
+    if (Array.isArray(config.downloadedGames)) {
+      console.log('[Config] Migrating "downloadedGames" from array to object format for better readability...');
+      const newDownloadedGames = {};
+      for (const gameId of config.downloadedGames) {
+        newDownloadedGames[gameId] = 'Unknown Title (migrated)';
+      }
+      saveConfig({ downloadedGames: newDownloadedGames });
+      config.downloadedGames = newDownloadedGames;
+    }
+
+    const downloadedGames = config.downloadedGames || {}; // Use an object for {id: title} mapping
     
     const availableTags = await fetchAvailableTags(accessToken);
     if (availableTags.length > 0) {
@@ -522,7 +534,7 @@ async function main() {
       }
 
       // Check if the game is already marked as complete in config.json
-      if (downloadedGames.has(gameId)) {
+      if (downloadedGames.hasOwnProperty(gameId)) {
         console.log(`[${gameDetails.title}] is marked as complete in config.json. Skipping.`);
         continue;
       }
@@ -636,8 +648,8 @@ async function main() {
 
       // After all installers for the game are downloaded, mark it as complete.
       if (gamesToDownload > 0) {
-        downloadedGames.add(gameId);
-        saveConfig({ downloadedGames: Array.from(downloadedGames) });
+        downloadedGames[gameId] = gameDetails.title;
+        saveConfig({ downloadedGames: downloadedGames });
         console.log(`[${gameDetails.title}] successfully downloaded and marked as complete.`);
       }
     }
