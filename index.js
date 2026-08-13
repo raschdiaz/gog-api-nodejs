@@ -609,6 +609,13 @@ async function main() {
             await downloadFileWithResume(item.manualUrl, filePath, accessToken);
             downloadSuccess = true; // Success, exit retry loop
           } catch (err) {
+            // Handle 404 Not Found errors gracefully
+            if (err.message.includes('HTTP 404')) {
+              console.warn(`\n  Warning: File not found on server (404). Skipping: ${fileName}`);
+              downloadSuccess = true; // Mark as "success" to skip retries and move to the next file.
+              break; // Exit the retry loop for this file.
+            }
+
             const isNetworkError = err.cause && ['ENOTFOUND', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN'].includes(err.cause.code);
             if (isNetworkError) {
               retries++;
