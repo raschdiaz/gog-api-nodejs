@@ -11,7 +11,6 @@ const CLIENT_SECRET = '9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc
 const REDIRECT_URI = 'https://embed.gog.com/on_login_success?origin=client';
 
 // Config & Persistence
-const TOKENS_FILE = './tokens.json';
 const CONFIG_FILE = './config.json';
 const DEFAULT_DOWNLOAD_DIR = './gog_offline_backup';
 const TARGET_PLATFORM = 'windows'; // Options: 'windows', 'mac', 'linux'
@@ -21,13 +20,8 @@ const TARGET_LANGUAGE = 'English';
  * Load tokens from disk if present
  */
 function loadStoredTokens() {
-  if (!fs.existsSync(TOKENS_FILE)) return null;
-  try {
-    const raw = fs.readFileSync(TOKENS_FILE, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  const config = loadConfig();
+  return config.tokens || null;
 }
 
 /**
@@ -40,8 +34,8 @@ function saveTokens(tokenData) {
     expires_in: tokenData.expires_in || 3600,
     saved_at: Date.now()
   };
-  fs.writeFileSync(TOKENS_FILE, JSON.stringify(payload, null, 2), 'utf8');
-  console.log(`[Auth] Saved updated tokens to ${TOKENS_FILE}`);
+  saveConfig({ tokens: payload });
+  console.log(`[Auth] Saved updated tokens to ${CONFIG_FILE}`);
 }
 
 /**
@@ -463,6 +457,20 @@ async function fetchAvailableTags(accessToken) {
  */
 async function main() {
   try {
+    // One-time migration: move tokens from tokens.json into config.json
+    const LEGACY_TOKENS_FILE = './tokens.json';
+    if (fs.existsSync(LEGACY_TOKENS_FILE)) {
+      console.log(`[Config] Migrating tokens from legacy ${LEGACY_TOKENS_FILE} to ${CONFIG_FILE}...`);
+      try {
+        const raw = fs.readFileSync(LEGACY_TOKENS_FILE, 'utf8');
+        const tokenData = JSON.parse(raw);
+        saveConfig({ tokens: tokenData });
+        fs.unlinkSync(LEGACY_TOKENS_FILE);
+        console.log(`[Config] Migration complete. ${LEGACY_TOKENS_FILE} has been deleted.`);
+      } catch (err) {
+        console.warn(`[Config] Warning: Could not migrate tokens.json: ${err.message}. You may need to log in again.`);
+      }
+    }
     const accessToken = await getValidAccessToken();
 
     const rl = readline.createInterface({ input: stdin, output: stdout });
