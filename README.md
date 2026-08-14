@@ -7,7 +7,7 @@ A Node.js command-line script to download your GOG.com game library for offline 
 *   **Secure Authentication:**
     *   Interactive, browser-based login for the first run.
     *   Automatic token refresh for subsequent sessions.
-    *   Securely stores authentication tokens locally in `tokens.json`.
+    *   Securely stores authentication tokens locally in `config.json`.
 
 *   **Intelligent Downloading:**
     *   **Resumable Downloads:** Automatically resumes interrupted downloads from where they left off.
@@ -56,7 +56,9 @@ The script will automatically use your saved authentication token. It will promp
 
 ## Configuration Files
 
-The script will create two files in the same directory:
+The script will create a `config.json` file in the same directory. This file stores:
 
-*   `tokens.json`: Stores your authentication and refresh tokens so you don't have to log in every time. **Do not share this file.**
-*   `config.json`: Stores your preferred download directory and filter tags. You can edit this file manually if you wish.
+*   Your authentication and refresh tokens so you don't have to log in every time. **Do not share this file.**
+*   Your preferred download directory and filter tags.
+
+You can edit this file manually if you wish. On its first run, the script will automatically migrate any old `tokens.json` file into this new format and delete the old file.

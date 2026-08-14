@@ -609,8 +609,8 @@ async function main() {
 
       gamesToDownload++;
 
-      const MAX_RETRIES = 10;
-      const RETRY_DELAY_MS = 5000; // 5 seconds
+      const MAX_RETRIES = 60*60; // 1 hour of retries
+      const RETRY_DELAY_MS = 1000; // 1 second
 
       let installerIndex = 0;
       for (const item of gameDetails.installers) {
