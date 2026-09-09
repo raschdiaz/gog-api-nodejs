@@ -14,8 +14,15 @@ const REDIRECT_URI = 'https://embed.gog.com/on_login_success?origin=client';
 // Config & Persistence
 const CONFIG_FILE = './config.json';
 const DEFAULT_DOWNLOAD_DIR = './gog_offline_backup';
-const TARGET_PLATFORM = 'windows'; // Options: 'windows', 'mac', 'linux'
+const DEFAULT_TARGET_PLATFORM = 'windows'; // Options: 'windows', 'mac', 'linux'
+const SUPPORTED_PLATFORMS = ['windows', 'mac', 'linux'];
 const TARGET_LANGUAGE = 'English';
+
+function normalizePlatform(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (SUPPORTED_PLATFORMS.includes(normalized)) return normalized;
+  return null;
+}
 
 /**
  * Load tokens from disk if present
@@ -255,7 +262,7 @@ async function fetchOwnedGames(accessToken) {
 /**
  * Fetch game details, including installer links and tags
  */
-async function getGameDetails(gameId, accessToken) {
+async function getGameDetails(gameId, accessToken, targetPlatform = DEFAULT_TARGET_PLATFORM) {
   const res = await fetch(`https://embed.gog.com/account/gameDetails/${gameId}.json`, { headers: getHeaders(accessToken) });
   if (!res.ok) return null;
 
@@ -271,7 +278,7 @@ async function getGameDetails(gameId, accessToken) {
       // Filter by language
       if (languageName.toLowerCase() !== TARGET_LANGUAGE.toLowerCase()) continue;
 
-      const platformFiles = group[1]?.[TARGET_PLATFORM];
+      const platformFiles = group[1]?.[targetPlatform];
       if (Array.isArray(platformFiles)) {
         for (const file of platformFiles) {
           // We still need the game title for the folder name later
@@ -444,7 +451,7 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
  * Determines the most likely final filename for a download item.
  * This function is crucial for both checking existing files and for saving/resuming new ones.
  */
-async function getPredictedFilename(item, accessToken) {
+async function getPredictedFilename(item, accessToken, targetPlatform = DEFAULT_TARGET_PLATFORM) {
   let predictedName = item.name;
 
   // 1. Fetch headers to check for Content-Disposition, which is the most reliable source.
@@ -485,7 +492,7 @@ async function getPredictedFilename(item, accessToken) {
   }
 
   // 3. If it still lacks an extension, apply the platform-specific fallback.
-  if (!path.extname(predictedName) && TARGET_PLATFORM === 'windows') {
+  if (!path.extname(predictedName) && targetPlatform === 'windows') {
     predictedName += '.exe';
   }
 
@@ -533,6 +540,7 @@ async function main() {
 
     const config = loadConfig();
     const lastDownloadDir = config.downloadDir || DEFAULT_DOWNLOAD_DIR;
+    const lastTargetPlatform = normalizePlatform(config.targetPlatform) || DEFAULT_TARGET_PLATFORM;
     const lastTags = config.tags || [];
 
     // Backward compatibility: migrate 'completedGames' (array) to 'downloadedGames' (object)
@@ -569,6 +577,11 @@ async function main() {
     );
     const downloadDir = downloadDirInput.trim() || lastDownloadDir;
 
+    const platformInput = await rl.question(
+      `Enter installer OS to download [windows/mac/linux] (or press Enter for default: ${lastTargetPlatform}): `
+    );
+    const targetPlatform = normalizePlatform(platformInput) || lastTargetPlatform;
+
     const tagsInput = await rl.question(
       `Enter tags to filter by (or press Enter for default: ${lastTagsString || 'all'}): `
     );
@@ -579,20 +592,21 @@ async function main() {
       : lastTags;
 
     // Save the latest settings for the next run
-    saveConfig({ downloadDir: downloadDir, tags: targetTags });
+    saveConfig({ downloadDir: downloadDir, tags: targetTags, targetPlatform: targetPlatform });
 
     if (targetTags.length > 0) {
       console.log(`\nFiltering for games with tags: ${targetTags.join(', ')}`);
     }
 
-    console.log(`\nUsing download directory: ${path.resolve(downloadDir)}`);
+    console.log(`\nUsing installer OS: ${targetPlatform}`);
+    console.log(`Using download directory: ${path.resolve(downloadDir)}`);
     console.log('Fetching GOG library...');
     const gameIds = await fetchOwnedGames(accessToken);
     console.log(`Found ${gameIds.length} owned games.\n`);
     let gamesToDownload = 0;
 
     for (const gameId of gameIds) {
-      const gameDetails = await getGameDetails(gameId, accessToken);
+      const gameDetails = await getGameDetails(gameId, accessToken, targetPlatform);
       if (!gameDetails || gameDetails.installers.length === 0) {
         continue;
       }
@@ -677,7 +691,7 @@ async function main() {
         fs.mkdirSync(targetDir, { recursive: true });
 
         // Use the predicted filename for saving and resuming.
-        const fileName = await getPredictedFilename(item, accessToken);
+        const fileName = await getPredictedFilename(item, accessToken, targetPlatform);
         const filePath = path.join(targetDir, fileName);
 
         let retries = 0;
