@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline/promises';
+import { spawn } from 'child_process';
 import { stdin, stdout } from 'process';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -292,9 +293,64 @@ async function getGameDetails(gameId, accessToken) {
 }
 
 /**
+ * Linux-specific downloader using curl for more reliable large-file transfer,
+ * resume support, and network retry behavior compared to the raw fetch() stream.
+ */
+async function downloadFileWithCurl(downloadUrl, savePath, accessToken) {
+  const headers = getHeaders(accessToken);
+  const curlArgs = [
+    '--fail',
+    '--location',
+    '--connect-timeout', '15',
+    '--max-time', '0',
+    '--retry', '10',
+    '--retry-delay', '2',
+    '--retry-all-errors',
+    '--http1.1',
+    '--user-agent', headers['User-Agent'],
+    '--header', `Authorization: Bearer ${accessToken}`,
+    '--output', savePath
+  ];
+
+  if (fs.existsSync(savePath) && fs.statSync(savePath).size > 0) {
+    curlArgs.push('--continue-at', '-');
+    console.log(`  Resuming download from byte offset ${formatBytes(fs.statSync(savePath).size)}...`);
+  }
+
+  const curl = spawn('curl', [...curlArgs, downloadUrl], { stdio: 'inherit' });
+
+  await new Promise((resolve, reject) => {
+    curl.on('error', (error) => reject(error));
+    curl.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`curl exited with code ${code}`));
+    });
+  });
+}
+
+/**
  * Resumable file downloader
  */
 async function downloadFileWithResume(manualUrl, savePath, accessToken) {
+  const downloadUrl = `https://embed.gog.com${manualUrl}`;
+
+  if (process.platform === 'linux') {
+    try {
+      const curlCheck = spawn('curl', ['--version'], { stdio: 'ignore' });
+      const curlReady = await new Promise((resolve) => {
+        curlCheck.on('error', () => resolve(false));
+        curlCheck.on('close', (code) => resolve(code === 0));
+      });
+
+      if (curlReady) {
+        await downloadFileWithCurl(downloadUrl, savePath, accessToken);
+        return;
+      }
+    } catch {
+      // Fall back to the native Node implementation below.
+    }
+  }
+
   let existingSize = 0;
   if (fs.existsSync(savePath)) {
     existingSize = fs.statSync(savePath).size;
@@ -305,7 +361,7 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
     requestHeaders['Range'] = `bytes=${existingSize}-`;
   }
 
-  const res = await fetch(`https://embed.gog.com${manualUrl}`, {
+  const res = await fetch(downloadUrl, {
     headers: requestHeaders,
     redirect: 'follow'
   });
