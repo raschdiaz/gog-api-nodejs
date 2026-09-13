@@ -14,7 +14,7 @@ A Node.js command-line script to download your GOG.com game library for offline 
     *   **Resumable Downloads:** Automatically resumes interrupted downloads from where they left off.
     *   **Skips Completed Games:** Intelligently checks for existing files and their sizes to skip games that are already fully downloaded.
     *   **Robust Filename Detection:** Ensures correct filenames and extensions by checking API metadata, `Content-Disposition` headers, and download URLs.
-    *   **Organized Structure:** Saves each game's installers into its own dedicated folder (e.g., `./gog_offline_backup/The Witcher 3 Wild Hunt/`).
+    *   **Organized Structure:** Saves each game's installers into a platform-specific folder (e.g., `./gog_offline_backup/windows/The Witcher 3 Wild Hunt/`).
     *   **Network Resilience:** Automatically pauses and retries downloads if the internet connection is lost, attempting to resume from the point of interruption.
 
 *   **Powerful Filtering:**
@@ -71,5 +71,6 @@ The script will create a `config.json` file in the same directory. This file sto
 
 *   Your authentication and refresh tokens so you don't have to log in every time. **Do not share this file.**
 *   Your preferred download directory, selected installer OS, and filter tags.
+*   Download completion state grouped by platform under `downloadedGames`, so the same game can be downloaded separately for Windows, macOS, and Linux.
 
 You can edit this file manually if you wish. On its first run, the script will automatically migrate any old `tokens.json` file into this new format and delete the old file.

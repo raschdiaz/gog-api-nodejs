@@ -551,18 +551,24 @@ async function main() {
       saveConfig(config);
     }
 
-    // Data structure migration: from array of IDs to object of {id: title}
+    // Migrate older flat/array state into platform-specific game state.
     if (Array.isArray(config.downloadedGames)) {
-      console.log('[Config] Migrating "downloadedGames" from array to object format for better readability...');
-      const newDownloadedGames = {};
+      console.log('[Config] Migrating "downloadedGames" from array to platform-specific object format...');
+      const migratedGames = {};
       for (const gameId of config.downloadedGames) {
-        newDownloadedGames[gameId] = 'Unknown Title (migrated)';
+        migratedGames[gameId] = 'Unknown Title (migrated)';
       }
-      saveConfig({ downloadedGames: newDownloadedGames });
-      config.downloadedGames = newDownloadedGames;
+      config.downloadedGames = { [lastTargetPlatform]: migratedGames };
+      saveConfig({ downloadedGames: config.downloadedGames });
+    } else if (config.downloadedGames && !Object.values(config.downloadedGames).every(value =>
+      value && typeof value === 'object' && !Array.isArray(value)
+    )) {
+      console.log('[Config] Migrating "downloadedGames" to platform-specific object format...');
+      config.downloadedGames = { [lastTargetPlatform]: config.downloadedGames };
+      saveConfig({ downloadedGames: config.downloadedGames });
     }
 
-    const downloadedGames = config.downloadedGames || {}; // Use an object for {id: title} mapping
+    const downloadedGames = config.downloadedGames?.[lastTargetPlatform] || {};
     
     const availableTags = await fetchAvailableTags(accessToken);
     if (availableTags.length > 0) {
@@ -592,14 +598,36 @@ async function main() {
       : lastTags;
 
     // Save the latest settings for the next run
-    saveConfig({ downloadDir: downloadDir, tags: targetTags, targetPlatform: targetPlatform });
+    const platformDownloadedGames = config.downloadedGames?.[targetPlatform] || {};
+    saveConfig({
+      downloadDir: downloadDir,
+      tags: targetTags,
+      targetPlatform: targetPlatform,
+      downloadedGames: {
+        ...(config.downloadedGames || {}),
+        [targetPlatform]: platformDownloadedGames
+      }
+    });
 
     if (targetTags.length > 0) {
       console.log(`\nFiltering for games with tags: ${targetTags.join(', ')}`);
     }
 
     console.log(`\nUsing installer OS: ${targetPlatform}`);
-    console.log(`Using download directory: ${path.resolve(downloadDir)}`);
+    const platformDownloadDir = path.join(downloadDir, targetPlatform);
+    for (const gameTitle of Object.values(platformDownloadedGames)) {
+      if (!gameTitle || gameTitle.includes('(migrated)')) continue;
+
+      const folderName = gameTitle.replace(/[/\\?%*:|"<>]/g, '');
+      const legacyGameDir = path.join(downloadDir, folderName);
+      const platformGameDir = path.join(platformDownloadDir, folderName);
+      if (fs.existsSync(legacyGameDir) && !fs.existsSync(platformGameDir)) {
+        fs.mkdirSync(platformDownloadDir, { recursive: true });
+        fs.renameSync(legacyGameDir, platformGameDir);
+        console.log(`[Config] Moved ${gameTitle} into the ${targetPlatform} folder.`);
+      }
+    }
+    console.log(`Using download directory: ${path.resolve(platformDownloadDir)}`);
     console.log('Fetching GOG library...');
     const gameIds = await fetchOwnedGames(accessToken);
     console.log(`Found ${gameIds.length} owned games.\n`);
@@ -612,7 +640,7 @@ async function main() {
       }
 
       // Check if the game is already marked as complete in config.json
-      if (downloadedGames.hasOwnProperty(gameId)) {
+      if (platformDownloadedGames.hasOwnProperty(gameId)) {
         console.log(`[${gameDetails.title}] is marked as complete in config.json. Skipping.`);
         continue;
       }
@@ -632,7 +660,7 @@ async function main() {
       // This block checks if a game's folder exists and if all its files are present and match the expected size.
       // If everything matches, it skips the game. It has been commented out to force re-downloads.
       const gameFolderName = gameDetails.title.replace(/[/\\?%*:|"<>]/g, '');
-      const gameDir = path.join(downloadDir, gameFolderName);
+      const gameDir = path.join(platformDownloadDir, gameFolderName);
       if (fs.existsSync(gameDir)) {
         let isComplete = true;
 
@@ -687,7 +715,7 @@ async function main() {
         installerIndex++;
         const totalInstallers = gameDetails.installers.length;
         const folderName = item.gameTitle.replace(/[/\\?%*:|"<>]/g, '');
-        const targetDir = path.join(downloadDir, folderName);
+        const targetDir = path.join(platformDownloadDir, folderName);
         fs.mkdirSync(targetDir, { recursive: true });
 
         // Use the predicted filename for saving and resuming.
@@ -726,8 +754,13 @@ async function main() {
 
       // After all installers for the game are downloaded, mark it as complete.
       if (gamesToDownload > 0) {
-        downloadedGames[gameId] = gameDetails.title;
-        saveConfig({ downloadedGames: downloadedGames });
+        platformDownloadedGames[gameId] = gameDetails.title;
+        saveConfig({
+          downloadedGames: {
+            ...(config.downloadedGames || {}),
+            [targetPlatform]: platformDownloadedGames
+          }
+        });
         console.log(`[${gameDetails.title}] successfully downloaded and marked as complete.`);
       }
     }

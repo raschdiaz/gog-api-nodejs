@@ -1,0 +1,5 @@
+{
+  "name": "gog-api-nodejs",
+  "private": true,
+  "type": "module"
+}
