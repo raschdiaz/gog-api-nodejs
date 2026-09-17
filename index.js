@@ -202,6 +202,83 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+function normalizeDownloadedGameState(gameId, value, fallbackTitle = '') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      title: typeof value === 'string' ? value : fallbackTitle || String(gameId),
+      parts: []
+    };
+  }
+
+  const title = typeof value.title === 'string' && value.title.trim()
+    ? value.title
+    : fallbackTitle || String(gameId);
+
+  const rawParts = Array.isArray(value.parts) ? value.parts : [];
+  const uniqueParts = [...new Set(rawParts
+    .filter(part => typeof part === 'string' && part.trim())
+    .map(part => part.trim()))];
+  const partNames = new Set(uniqueParts.map(part => part.toLowerCase()));
+  const parts = uniqueParts.filter(part => {
+    return path.extname(part) || !partNames.has(`${part}.exe`.toLowerCase());
+  });
+
+  return { title, parts };
+}
+
+function normalizeSavedPartName(partName) {
+  if (typeof partName !== 'string') return '';
+  return partName.trim().replace(/[\/\\?%*:|"<>]/g, '_');
+}
+
+function hasSavedPartName(savedPartNames, candidateNames) {
+  const normalizedSaved = new Set(
+    [...savedPartNames]
+      .map(normalizeSavedPartName)
+      .filter(Boolean)
+  );
+
+  return [...new Set(candidateNames
+    .map(normalizeSavedPartName)
+    .filter(Boolean))]
+    .some(name => normalizedSaved.has(name));
+}
+
+function findSavedPartFile(targetDir, savedPartNames) {
+  if (!fs.existsSync(targetDir)) return null;
+
+  const normalizedSaved = new Set(
+    [...savedPartNames]
+      .map(normalizeSavedPartName)
+      .filter(Boolean)
+  );
+
+  const matchingFiles = fs.readdirSync(targetDir)
+    .map(fileName => path.join(targetDir, fileName))
+    .filter(filePath => {
+      return fs.statSync(filePath).isFile()
+        && normalizedSaved.has(normalizeSavedPartName(path.basename(filePath)));
+    });
+
+  return matchingFiles.length === 1 ? matchingFiles[0] : null;
+}
+
+function findPartFileByNames(targetDir, partNames) {
+  if (!fs.existsSync(targetDir)) return null;
+
+  const normalizedNames = new Set(
+    partNames.map(normalizeSavedPartName).filter(Boolean)
+  );
+  const matchingFiles = fs.readdirSync(targetDir)
+    .map(fileName => path.join(targetDir, fileName))
+    .filter(filePath => {
+      return fs.statSync(filePath).isFile()
+        && normalizedNames.has(normalizeSavedPartName(path.basename(filePath)));
+    });
+
+  return matchingFiles.length === 1 ? matchingFiles[0] : null;
+}
+
 /**
  * Terminal progress bar render
  */
@@ -470,29 +547,7 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
   drawProgressBar(existingSize + downloadedInSession, totalSize, 0);
   process.stdout.write('\n');
 
-  // Post-download check: Rename file if the final URL has a better name
-  let newName = null;
-  const contentDisposition = res.headers.get('content-disposition');
-  // 1. Always prioritize the Content-Disposition header. It's the most reliable source.
-  if (contentDisposition) {
-    const match = contentDisposition.match(/filename\*?=['"]?([^'"]+)['"]?/);
-    if (match && match[1]) {
-      newName = decodeURIComponent(match[1]);
-    }
-  }
-  // 2. If no header, fall back to the final URL path.
-  if (!newName) {
-    const urlPath = new URL(finalUrl).pathname;
-    newName = path.basename(urlPath);
-  }
-  // 3. If we found a better name that is different from the current one, rename the file.
-  if (newName && newName !== path.basename(savePath)) {
-    const newPath = path.join(path.dirname(savePath), newName);
-    // Ensure the target path doesn't already exist, or handle it.
-    // For simplicity, we'll just rename. If this causes issues, we might need to delete the target first.
-    fs.renameSync(savePath, newPath);
-    console.log(`  File renamed to ${newName}`);
-  }
+  return path.basename(savePath);
 }
 
 /**
@@ -502,7 +557,6 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
 async function getPredictedFilename(item, accessToken, targetPlatform = DEFAULT_TARGET_PLATFORM) {
   let predictedName = item.name;
 
-  // 1. Fetch headers to check for Content-Disposition, which is the most reliable source.
   try {
     const res = await fetch(`https://embed.gog.com${item.manualUrl}`, {
       method: 'HEAD',
@@ -510,41 +564,30 @@ async function getPredictedFilename(item, accessToken, targetPlatform = DEFAULT_
       redirect: 'follow'
     });
 
-    if (res.ok) {
-      const contentDisposition = res.headers.get('content-disposition');
-      if (contentDisposition) {
-        const match = contentDisposition.match(/filename\*?=['"]?([^'"]+)['"]?/);
-        if (match && match[1]) {
-          predictedName = decodeURIComponent(match[1]);
-        }
+    const contentDisposition = res.headers.get('content-disposition');
+    const dispositionMatch = contentDisposition?.match(
+      /filename\*=UTF-8''([^;]+)|filename=['"]?([^;'"]+)['"]?/i
+    );
+    const dispositionName = dispositionMatch?.[1] || dispositionMatch?.[2];
+    if (dispositionName) {
+      try {
+        predictedName = decodeURIComponent(dispositionName);
+      } catch {
+        predictedName = dispositionName;
       }
-      // If no Content-Disposition, use the final URL after redirects
-      if (predictedName === item.name) {
-        const urlPath = new URL(res.url).pathname;
-        predictedName = path.basename(urlPath);
-      }
+    } else if (res.ok) {
+      const urlName = path.basename(new URL(res.url).pathname);
+      if (urlName) predictedName = urlName;
     }
-  } catch (e) {
-    // If HEAD request fails, fall back to less reliable methods
+  } catch {
+    // Fall back to the API name when the filename lookup fails.
   }
 
-  // 2. If the name (from API or HEAD request) lacks an extension, try the original URL path.
-  if (!path.extname(predictedName)) {
-    try {
-      const urlPath = new URL(`https://embed.gog.com${item.manualUrl}`).pathname;
-      const nameFromUrl = path.basename(urlPath);
-      if (nameFromUrl && path.extname(nameFromUrl)) {
-        predictedName = nameFromUrl;
-      }
-    } catch (e) {/* Ignore malformed URL */}
-  }
-
-  // 3. If it still lacks an extension, apply the platform-specific fallback.
   if (!path.extname(predictedName) && targetPlatform === 'windows') {
     predictedName += '.exe';
   }
 
-  // 3. Sanitize the name to remove invalid characters.
+  // Sanitize the name to remove invalid characters.
   predictedName = predictedName.replace(/[/\\?%*:|"<>]/g, '_');
   return predictedName;
 }
@@ -600,20 +643,29 @@ async function main() {
       saveConfig(config);
     }
 
-    // Migrate older flat/array state into platform-specific game state.
-    if (Array.isArray(config.downloadedGames)) {
-      console.log('[Config] Migrating "downloadedGames" from array to platform-specific object format...');
-      const migratedGames = {};
-      for (const gameId of config.downloadedGames) {
-        migratedGames[gameId] = 'Unknown Title (migrated)';
+    // Normalize downloadedGames to platform -> gameId -> { title, parts: [...] }
+    if (config.downloadedGames && typeof config.downloadedGames === 'object') {
+      const normalizedDownloadState = {};
+      for (const [platform, platformGames] of Object.entries(config.downloadedGames)) {
+        if (!platformGames || typeof platformGames !== 'object' || Array.isArray(platformGames)) {
+          normalizedDownloadState[platform] = {};
+          continue;
+        }
+
+        normalizedDownloadState[platform] = {};
+        for (const [gameId, gameValue] of Object.entries(platformGames)) {
+          normalizedDownloadState[platform][gameId] = normalizeDownloadedGameState(gameId, gameValue, 'Unknown Title (migrated)');
+        }
       }
-      config.downloadedGames = { [legacyPlatform]: migratedGames };
-      saveConfig({ downloadedGames: config.downloadedGames });
-    } else if (config.downloadedGames && !Object.values(config.downloadedGames).every(value =>
-      value && typeof value === 'object' && !Array.isArray(value)
-    )) {
-      console.log('[Config] Migrating "downloadedGames" to platform-specific object format...');
-      config.downloadedGames = { [legacyPlatform]: config.downloadedGames };
+
+      if (JSON.stringify(config.downloadedGames) !== JSON.stringify(normalizedDownloadState)) {
+        console.log('[Config] Normalizing "downloadedGames" to part-level state...');
+        config.downloadedGames = normalizedDownloadState;
+        saveConfig({ downloadedGames: config.downloadedGames });
+      }
+    } else {
+      console.log('[Config] Initializing "downloadedGames" state...');
+      config.downloadedGames = { [legacyPlatform]: {} };
       saveConfig({ downloadedGames: config.downloadedGames });
     }
 
@@ -667,7 +719,11 @@ async function main() {
       const platformDownloadedGames = config.downloadedGames?.[platform] || {};
       const platformDownloadDir = path.join(downloadDir, platform);
 
-      for (const gameTitle of Object.values(platformDownloadedGames)) {
+      for (const gameEntry of Object.values(platformDownloadedGames)) {
+        const gameTitle = typeof gameEntry === 'string'
+          ? gameEntry
+          : (gameEntry && typeof gameEntry.title === 'string' ? gameEntry.title : null);
+
         if (!gameTitle || gameTitle.includes('(migrated)')) continue;
 
         const folderName = gameTitle.replace(/[/\\?%*:|"<>]/g, '');
@@ -689,11 +745,10 @@ async function main() {
         continue;
       }
 
-      // Check if the game is already marked as complete in config.json
-      if (platformDownloadedGames.hasOwnProperty(gameId)) {
-        console.log(`[${gameDetails.title}] is marked as complete in config.json. Skipping.`);
-        continue;
-      }
+      // Remove old whole-game completion marker in favor of per-part tracking.
+      const savedGameState = normalizeDownloadedGameState(gameId, platformDownloadedGames[gameId], gameDetails.title);
+      const savedPartNames = new Set(savedGameState.parts);
+      const completedPartNames = new Set();
 
       // Filter by tags if any are specified
       if (targetTags.length > 0) {
@@ -705,62 +760,13 @@ async function main() {
         }
       }
 
-      /*
-      // == LOGIC TO SKIP ALREADY DOWNLOADED FILES ==
-      // This block checks if a game's folder exists and if all its files are present and match the expected size.
-      // If everything matches, it skips the game. It has been commented out to force re-downloads.
-      const gameFolderName = gameDetails.title.replace(/[/\\?%*:|"<>]/g, '');
-      const gameDir = path.join(platformDownloadDir, gameFolderName);
-      if (fs.existsSync(gameDir)) {
-        let isComplete = true;
-
-        for (const installer of gameDetails.installers) {
-          const expectedSize = parseSizeToBytes(installer.size);
-          const predictedFilename = await getPredictedFilename(installer, accessToken);
-          const predictedFilePath = path.join(gameDir, predictedFilename);
-
-          if (!fs.existsSync(predictedFilePath)) {
-            isComplete = false; // File doesn't exist at the predicted path
-            break;
-          }
-
-          let actualSize = 0;
-          try {
-            actualSize = fs.statSync(predictedFilePath).size;
-          } catch (e) {
-            isComplete = false; // Cannot stat file, assume incomplete
-            break;
-          }
-
-          // Check if the file is complete (within tolerance)
-          const tolerance = expectedSize * 0.001;
-          if (expectedSize > 0 && Math.abs(actualSize - expectedSize) > tolerance) {
-            // File exists but size doesn't match (could be partial or incorrect)
-            isComplete = false;
-            break;
-          }
-        }
-
-        // If isComplete is true here, it means all predicted files exist and are of correct size.
-        // The post-download rename might have changed names, but we assume the predicted name
-        // is what downloadFileWithResume will look for.
-        // If a file was renamed, this check might fail, but the download loop will then
-        // download it again, and a post-download rename will ensure it gets the correct name.
-        // The key is that downloadFileWithResume will always look for the predicted name.
-
-        if (isComplete) {
-          console.log(`[${gameDetails.title}] is already complete. Skipping.`);
-          continue;
-        }
-      }
-      */
-
       gamesToDownload++;
 
       const MAX_RETRIES = 60*60; // 1 hour of retries
       const RETRY_DELAY_MS = 1000; // 1 second
 
       let installerIndex = 0;
+      let allPartsCompleted = true;
       for (const item of gameDetails.installers) {
         installerIndex++;
         const totalInstallers = gameDetails.installers.length;
@@ -772,14 +778,56 @@ async function main() {
         const fileName = await getPredictedFilename(item, accessToken, platform);
         let filePath = path.join(targetDir, fileName);
 
-        // Older runs may have left a partial file under the API filename before
-        // the completed download was renamed from Content-Disposition.
         const legacyFileName = item.name.replace(/[/\\?%*:|"<>]/g, '_');
         const legacyFilePath = path.join(targetDir, legacyFileName);
         if (!fs.existsSync(filePath) && legacyFileName !== fileName && fs.existsSync(legacyFilePath)) {
-          filePath = legacyFilePath;
-          console.log(`  Found existing partial file under legacy name; resuming ${legacyFileName}.`);
+          fs.renameSync(legacyFilePath, filePath);
+          console.log(`  Renamed existing part ${legacyFileName} to ${fileName}.`);
         }
+
+        const candidatePartNames = [
+          item.name,
+          legacyFileName,
+          fileName,
+          path.basename(filePath),
+          path.basename(legacyFilePath)
+        ];
+        if (!fs.existsSync(filePath)) {
+          const existingPartPath = findPartFileByNames(targetDir, candidatePartNames);
+          if (existingPartPath) {
+            fs.renameSync(existingPartPath, filePath);
+            console.log(`  Renamed existing part ${path.basename(existingPartPath)} to ${fileName}.`);
+          }
+        }
+
+        if (!fs.existsSync(filePath) && gameDetails.installers.length === 1 && savedPartNames.size > 0) {
+          const savedPartPath = findSavedPartFile(targetDir, savedPartNames);
+          if (savedPartPath) {
+            filePath = savedPartPath;
+            console.log(`  Found existing saved part under ${path.basename(savedPartPath)}; using it for ${fileName}.`);
+          }
+        }
+
+        const partAlreadyRecorded = hasSavedPartName(savedPartNames, candidatePartNames);
+
+        const expectedSize = parseSizeToBytes(item.size);
+        const fileExists = fs.existsSync(filePath);
+        const completedFileSize = fileExists ? fs.statSync(filePath).size : 0;
+        const isPartComplete = expectedSize > 0
+          && fileExists
+          && Math.abs(completedFileSize - expectedSize) <= Math.max(1024, expectedSize * 0.001);
+
+        if (partAlreadyRecorded && !fileExists) {
+          console.warn(`[${item.gameTitle}] (${installerIndex}/${totalInstallers}) -> Saved part is marked in config but the file is missing. Re-downloading ${fileName}.`);
+        }
+
+        if ((partAlreadyRecorded || isPartComplete) && fileExists) {
+          console.log(`[${item.gameTitle}] (${installerIndex}/${totalInstallers}) -> ${fileName} already downloaded. Skipping part.`);
+          completedPartNames.add(fileName);
+          continue;
+        }
+
+        allPartsCompleted = false;
 
         let retries = 0;
         let downloadSuccess = false;
@@ -787,6 +835,18 @@ async function main() {
           try {
             console.log(`[${item.gameTitle}] (${installerIndex}/${totalInstallers}) -> ${fileName}`);
             await downloadFileWithResume(item.manualUrl, filePath, accessToken);
+            completedPartNames.add(fileName);
+            platformDownloadedGames[gameId] = {
+              title: gameDetails.title,
+              parts: [...completedPartNames]
+            };
+            saveConfig({
+              downloadedGames: {
+                ...(config.downloadedGames || {}),
+                [platform]: platformDownloadedGames
+              }
+            });
+            console.log(`  Saved download state for ${fileName}.`);
             downloadSuccess = true; // Success, exit retry loop
           } catch (err) {
             // Handle 404 Not Found errors gracefully
@@ -834,9 +894,12 @@ async function main() {
         }
       }
 
+      const finalGameState = normalizeDownloadedGameState(gameId, platformDownloadedGames[gameId], gameDetails.title);
+      finalGameState.parts = [...completedPartNames];
+      platformDownloadedGames[gameId] = finalGameState;
+
       // After all installers for the game are downloaded, mark it as complete.
       if (gamesToDownload > 0) {
-        platformDownloadedGames[gameId] = gameDetails.title;
         saveConfig({
           downloadedGames: {
             ...(config.downloadedGames || {}),
