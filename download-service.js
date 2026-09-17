@@ -49,7 +49,8 @@ export function parseSizeToBytes(sizeString) {
 export async function downloadFileWithCurl(downloadUrl, savePath, accessToken, allowRangeRestart = true) {
   const headers = getHeaders(accessToken);
   const curlArgs = [
-    '--fail', '--location', '--connect-timeout', '15', '--max-time', '0', '--http1.1',
+    '--fail', '--location', '--connect-timeout', '15', '--max-time', '0',
+    '--speed-limit', '1024', '--speed-time', '60', '--http1.1',
     '--user-agent', headers['User-Agent'], '--header', `Authorization: Bearer ${accessToken}`,
     '--write-out', '%{http_code}', '--output', savePath
   ];
