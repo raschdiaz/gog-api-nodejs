@@ -26,7 +26,7 @@ function findFileByNames(targetDir, partNames) {
   if (!fs.existsSync(targetDir)) return null;
 
   const normalizedNames = new Set(
-    partNames.map(normalizeSavedPartName).filter(Boolean)
+    [...partNames].map(normalizeSavedPartName).filter(Boolean)
   );
   const matchingFiles = fs.readdirSync(targetDir)
     .map(fileName => path.join(targetDir, fileName))
