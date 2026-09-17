@@ -206,7 +206,8 @@ function normalizeDownloadedGameState(gameId, value, fallbackTitle = '') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       title: typeof value === 'string' ? value : fallbackTitle || String(gameId),
-      parts: []
+      parts: [],
+      downloadedDate: null
     };
   }
 
@@ -223,7 +224,21 @@ function normalizeDownloadedGameState(gameId, value, fallbackTitle = '') {
     return path.extname(part) || !partNames.has(`${part}.exe`.toLowerCase());
   });
 
-  return { title, parts };
+  const downloadedDate = typeof value.downloadedDate === 'string'
+    && !Number.isNaN(Date.parse(value.downloadedDate))
+    ? value.downloadedDate
+    : null;
+
+  return { title, parts, downloadedDate };
+}
+
+function getLatestInstallerModifiedDate(installers) {
+  const timestamps = installers
+    .map(installer => installer.modifiedDate)
+    .filter(date => typeof date === 'string' && !Number.isNaN(Date.parse(date)))
+    .map(date => Date.parse(date));
+
+  return timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null;
 }
 
 function normalizeSavedPartName(partName) {
@@ -363,7 +378,8 @@ async function getGameDetails(gameId, accessToken, targetPlatform = DEFAULT_TARG
             gameTitle: data.title,
             name: file.name,
             manualUrl: file.manualUrl,
-            size: file.size
+            size: file.size,
+            modifiedDate: file.modifiedDate || file.modified_date || file.updatedAt || null
           });
         }
       }
@@ -749,6 +765,20 @@ async function main() {
       const savedGameState = normalizeDownloadedGameState(gameId, platformDownloadedGames[gameId], gameDetails.title);
       const savedPartNames = new Set(savedGameState.parts);
       const completedPartNames = new Set();
+      const latestModifiedDate = getLatestInstallerModifiedDate(gameDetails.installers);
+      const isOutdated = savedGameState.downloadedDate
+        && latestModifiedDate
+        && Date.parse(savedGameState.downloadedDate) < Date.parse(latestModifiedDate);
+
+      if (isOutdated) {
+        console.log(`[${gameDetails.title}] Installer files were modified on GOG after the previous download. Re-downloading all parts.`);
+        savedPartNames.clear();
+        platformDownloadedGames[gameId] = {
+          title: gameDetails.title,
+          parts: [],
+          downloadedDate: null
+        };
+      }
 
       // Filter by tags if any are specified
       if (targetTags.length > 0) {
@@ -792,6 +822,18 @@ async function main() {
           path.basename(filePath),
           path.basename(legacyFilePath)
         ];
+
+        if (isOutdated) {
+          for (const existingPartName of new Set([
+            ...candidatePartNames,
+            ...savedPartNames
+          ])) {
+            const existingPartPath = path.join(targetDir, normalizeSavedPartName(existingPartName));
+            if (fs.existsSync(existingPartPath)) fs.unlinkSync(existingPartPath);
+          }
+          filePath = path.join(targetDir, fileName);
+        }
+
         if (!fs.existsSync(filePath)) {
           const existingPartPath = findPartFileByNames(targetDir, candidatePartNames);
           if (existingPartPath) {
@@ -838,7 +880,8 @@ async function main() {
             completedPartNames.add(fileName);
             platformDownloadedGames[gameId] = {
               title: gameDetails.title,
-              parts: [...completedPartNames]
+              parts: [...completedPartNames],
+              downloadedDate: null
             };
             saveConfig({
               downloadedGames: {
@@ -896,6 +939,9 @@ async function main() {
 
       const finalGameState = normalizeDownloadedGameState(gameId, platformDownloadedGames[gameId], gameDetails.title);
       finalGameState.parts = [...completedPartNames];
+      finalGameState.downloadedDate = completedPartNames.size === gameDetails.installers.length
+        ? new Date().toISOString()
+        : null;
       platformDownloadedGames[gameId] = finalGameState;
 
       // After all installers for the game are downloaded, mark it as complete.
