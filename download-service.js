@@ -50,7 +50,7 @@ export async function downloadFileWithCurl(downloadUrl, savePath, accessToken, a
   const headers = getHeaders(accessToken);
   const curlArgs = [
     '--fail', '--location', '--connect-timeout', '15', '--max-time', '0',
-    '--speed-limit', '1024', '--speed-time', '60', '--http1.1',
+    '--speed-limit', '1024', '--speed-time', '60', '--http2',
     '--user-agent', headers['User-Agent'], '--header', `Authorization: Bearer ${accessToken}`,
     '--write-out', '%{http_code}', '--output', savePath
   ];
