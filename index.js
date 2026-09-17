@@ -14,8 +14,8 @@ const REDIRECT_URI = 'https://embed.gog.com/on_login_success?origin=client';
 // Config & Persistence
 const CONFIG_FILE = './config.json';
 const DEFAULT_DOWNLOAD_DIR = './gog_offline_backup';
-const DEFAULT_TARGET_PLATFORM = 'windows'; // Options: 'windows', 'mac', 'linux'
-const SUPPORTED_PLATFORMS = ['windows', 'mac', 'linux'];
+const DEFAULT_TARGET_PLATFORM = 'windows'; // Options: 'windows', 'mac', 'linux', 'all'
+const SUPPORTED_PLATFORMS = ['windows', 'mac', 'linux', 'all'];
 const TARGET_LANGUAGE = 'English';
 
 function normalizePlatform(value) {
@@ -300,37 +300,51 @@ async function getGameDetails(gameId, accessToken, targetPlatform = DEFAULT_TARG
 }
 
 /**
- * Linux-specific downloader using curl for more reliable large-file transfer,
- * resume support, and network retry behavior compared to the raw fetch() stream.
+ * Downloader using curl for more reliable large-file transfer, resume support,
+ * and network retry behavior compared to the raw fetch() stream.
  */
-async function downloadFileWithCurl(downloadUrl, savePath, accessToken) {
+async function downloadFileWithCurl(downloadUrl, savePath, accessToken, allowRangeRestart = true) {
   const headers = getHeaders(accessToken);
   const curlArgs = [
     '--fail',
     '--location',
     '--connect-timeout', '15',
     '--max-time', '0',
-    '--retry', '10',
-    '--retry-delay', '2',
-    '--retry-all-errors',
     '--http1.1',
     '--user-agent', headers['User-Agent'],
     '--header', `Authorization: Bearer ${accessToken}`,
+    '--write-out', '%{http_code}',
     '--output', savePath
   ];
 
-  if (fs.existsSync(savePath) && fs.statSync(savePath).size > 0) {
+  const existingSize = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
+  if (existingSize > 0) {
     curlArgs.push('--continue-at', '-');
-    console.log(`  Resuming download from byte offset ${formatBytes(fs.statSync(savePath).size)}...`);
+    console.log(`  Resuming download from byte offset ${formatBytes(existingSize)}...`);
   }
 
-  const curl = spawn('curl', [...curlArgs, downloadUrl], { stdio: 'inherit' });
+  const curl = spawn('curl', [...curlArgs, downloadUrl], {
+    stdio: ['ignore', 'pipe', 'inherit']
+  });
 
   await new Promise((resolve, reject) => {
+    let httpStatus = '';
+    curl.stdout.on('data', (chunk) => {
+      httpStatus += chunk.toString();
+    });
     curl.on('error', (error) => reject(error));
     curl.on('close', (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`curl exited with code ${code}`));
+      else if (code === 22 && httpStatus.trim() === '416' && existingSize > 0 && allowRangeRestart) {
+        fs.unlinkSync(savePath);
+        console.warn('  Server rejected the resume offset; restarting this file from byte zero.');
+        downloadFileWithCurl(downloadUrl, savePath, accessToken, false).then(resolve, reject);
+      }
+      else {
+        const error = new Error(`curl exited with code ${code}${httpStatus ? ` (HTTP ${httpStatus.trim()})` : ''}`);
+        error.code = 'ERR_DOWNLOAD_CURL';
+        reject(error);
+      }
     });
   });
 }
@@ -341,21 +355,15 @@ async function downloadFileWithCurl(downloadUrl, savePath, accessToken) {
 async function downloadFileWithResume(manualUrl, savePath, accessToken) {
   const downloadUrl = `https://embed.gog.com${manualUrl}`;
 
-  if (process.platform === 'linux') {
-    try {
-      const curlCheck = spawn('curl', ['--version'], { stdio: 'ignore' });
-      const curlReady = await new Promise((resolve) => {
-        curlCheck.on('error', () => resolve(false));
-        curlCheck.on('close', (code) => resolve(code === 0));
-      });
+  const curlReady = await new Promise((resolve) => {
+    const curlCheck = spawn('curl', ['--version'], { stdio: 'ignore' });
+    curlCheck.on('error', () => resolve(false));
+    curlCheck.on('close', (code) => resolve(code === 0));
+  });
 
-      if (curlReady) {
-        await downloadFileWithCurl(downloadUrl, savePath, accessToken);
-        return;
-      }
-    } catch {
-      // Fall back to the native Node implementation below.
-    }
+  if (curlReady) {
+    await downloadFileWithCurl(downloadUrl, savePath, accessToken);
+    return;
   }
 
   let existingSize = 0;
@@ -374,17 +382,39 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
   });
 
   if (res.status === 416) {
-    console.log(`  File is already complete (${formatBytes(existingSize)}).`);
-    return;
+    const contentRange = res.headers.get('content-range');
+    const totalMatch = contentRange?.match(/bytes \*\/(\d+)/i);
+    const totalSize = totalMatch ? Number(totalMatch[1]) : 0;
+
+    if (totalSize === 0 || existingSize >= totalSize) {
+      console.log(`  File is already complete (${formatBytes(existingSize)}).`);
+      return;
+    }
+
+    throw new Error(`HTTP 416: the existing partial file is larger than the remote file`);
   }
 
   if (!res.ok && res.status !== 206) {
     throw new Error(`HTTP ${res.status}: ${res.statusText}`);
   }
 
-  const isPartial = res.status === 206;
+  const isPartial = existingSize > 0 && res.status === 206;
+  const contentRange = res.headers.get('content-range');
+  let remoteTotalSize = 0;
+  if (existingSize > 0 && res.status === 200) {
+    console.warn('  Server ignored the resume request; restarting this file from the beginning.');
+  }
+  if (isPartial) {
+    const rangeMatch = contentRange?.match(/^bytes (\d+)-\d+\/(\d+|\*)$/i);
+    if (!rangeMatch || Number(rangeMatch[1]) !== existingSize) {
+      throw new Error('HTTP 206: server returned an invalid range for the existing partial file');
+    }
+    if (rangeMatch[2] !== '*') {
+      remoteTotalSize = Number(rangeMatch[2]);
+    }
+  }
   const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
-  const totalSize = isPartial ? existingSize + contentLength : contentLength;
+  const totalSize = remoteTotalSize || (isPartial ? existingSize + contentLength : contentLength);
   const finalUrl = res.url; // URL after redirects
 
   if (isPartial) {
@@ -418,7 +448,25 @@ async function downloadFileWithResume(manualUrl, savePath, accessToken) {
     drawProgressBar(existingSize + downloadedInSession, totalSize, currentSpeed);
   });
 
-  await pipeline(nodeReadable, fileStream);
+  try {
+    await pipeline(nodeReadable, fileStream);
+  } catch (err) {
+    err.code = err.code || 'ERR_DOWNLOAD_STREAM';
+    throw err;
+  }
+
+  const actualFileSize = fs.statSync(savePath).size;
+  const expectedFileSize = remoteTotalSize || (contentLength > 0
+    ? (isPartial ? existingSize + contentLength : contentLength)
+    : 0);
+  if (expectedFileSize > 0 && actualFileSize !== expectedFileSize) {
+    const error = new Error(
+      `Download ended early (${formatBytes(actualFileSize)} of ${formatBytes(expectedFileSize)} received)`
+    );
+    error.code = 'ERR_DOWNLOAD_INCOMPLETE';
+    throw error;
+  }
+
   drawProgressBar(existingSize + downloadedInSession, totalSize, 0);
   process.stdout.write('\n');
 
@@ -541,6 +589,7 @@ async function main() {
     const config = loadConfig();
     const lastDownloadDir = config.downloadDir || DEFAULT_DOWNLOAD_DIR;
     const lastTargetPlatform = normalizePlatform(config.targetPlatform) || DEFAULT_TARGET_PLATFORM;
+    const legacyPlatform = lastTargetPlatform === 'all' ? DEFAULT_TARGET_PLATFORM : lastTargetPlatform;
     const lastTags = config.tags || [];
 
     // Backward compatibility: migrate 'completedGames' (array) to 'downloadedGames' (object)
@@ -558,18 +607,16 @@ async function main() {
       for (const gameId of config.downloadedGames) {
         migratedGames[gameId] = 'Unknown Title (migrated)';
       }
-      config.downloadedGames = { [lastTargetPlatform]: migratedGames };
+      config.downloadedGames = { [legacyPlatform]: migratedGames };
       saveConfig({ downloadedGames: config.downloadedGames });
     } else if (config.downloadedGames && !Object.values(config.downloadedGames).every(value =>
       value && typeof value === 'object' && !Array.isArray(value)
     )) {
       console.log('[Config] Migrating "downloadedGames" to platform-specific object format...');
-      config.downloadedGames = { [lastTargetPlatform]: config.downloadedGames };
+      config.downloadedGames = { [legacyPlatform]: config.downloadedGames };
       saveConfig({ downloadedGames: config.downloadedGames });
     }
 
-    const downloadedGames = config.downloadedGames?.[lastTargetPlatform] || {};
-    
     const availableTags = await fetchAvailableTags(accessToken);
     if (availableTags.length > 0) {
       console.log('\nAvailable tags in your library:');
@@ -584,7 +631,7 @@ async function main() {
     const downloadDir = downloadDirInput.trim() || lastDownloadDir;
 
     const platformInput = await rl.question(
-      `Enter installer OS to download [windows/mac/linux] (or press Enter for default: ${lastTargetPlatform}): `
+      `Enter installer OS to download [windows/mac/linux/all] (or press Enter for default: ${lastTargetPlatform}): `
     );
     const targetPlatform = normalizePlatform(platformInput) || lastTargetPlatform;
 
@@ -598,43 +645,46 @@ async function main() {
       : lastTags;
 
     // Save the latest settings for the next run
-    const platformDownloadedGames = config.downloadedGames?.[targetPlatform] || {};
     saveConfig({
       downloadDir: downloadDir,
       tags: targetTags,
-      targetPlatform: targetPlatform,
-      downloadedGames: {
-        ...(config.downloadedGames || {}),
-        [targetPlatform]: platformDownloadedGames
-      }
+      targetPlatform: targetPlatform
     });
 
     if (targetTags.length > 0) {
       console.log(`\nFiltering for games with tags: ${targetTags.join(', ')}`);
     }
 
-    console.log(`\nUsing installer OS: ${targetPlatform}`);
-    const platformDownloadDir = path.join(downloadDir, targetPlatform);
-    for (const gameTitle of Object.values(platformDownloadedGames)) {
-      if (!gameTitle || gameTitle.includes('(migrated)')) continue;
-
-      const folderName = gameTitle.replace(/[/\\?%*:|"<>]/g, '');
-      const legacyGameDir = path.join(downloadDir, folderName);
-      const platformGameDir = path.join(platformDownloadDir, folderName);
-      if (fs.existsSync(legacyGameDir) && !fs.existsSync(platformGameDir)) {
-        fs.mkdirSync(platformDownloadDir, { recursive: true });
-        fs.renameSync(legacyGameDir, platformGameDir);
-        console.log(`[Config] Moved ${gameTitle} into the ${targetPlatform} folder.`);
-      }
-    }
-    console.log(`Using download directory: ${path.resolve(platformDownloadDir)}`);
+    const platformsToDownload = targetPlatform === 'all'
+      ? SUPPORTED_PLATFORMS.filter(platform => platform !== 'all')
+      : [targetPlatform];
     console.log('Fetching GOG library...');
     const gameIds = await fetchOwnedGames(accessToken);
     console.log(`Found ${gameIds.length} owned games.\n`);
     let gamesToDownload = 0;
 
-    for (const gameId of gameIds) {
-      const gameDetails = await getGameDetails(gameId, accessToken, targetPlatform);
+    for (const platform of platformsToDownload) {
+      const platformDownloadedGames = config.downloadedGames?.[platform] || {};
+      const platformDownloadDir = path.join(downloadDir, platform);
+
+      for (const gameTitle of Object.values(platformDownloadedGames)) {
+        if (!gameTitle || gameTitle.includes('(migrated)')) continue;
+
+        const folderName = gameTitle.replace(/[/\\?%*:|"<>]/g, '');
+        const legacyGameDir = path.join(downloadDir, folderName);
+        const platformGameDir = path.join(platformDownloadDir, folderName);
+        if (fs.existsSync(legacyGameDir) && !fs.existsSync(platformGameDir)) {
+          fs.mkdirSync(platformDownloadDir, { recursive: true });
+          fs.renameSync(legacyGameDir, platformGameDir);
+          console.log(`[Config] Moved ${gameTitle} into the ${platform} folder.`);
+        }
+      }
+
+      console.log(`\nUsing installer OS: ${platform}`);
+      console.log(`Using download directory: ${path.resolve(platformDownloadDir)}`);
+
+      for (const gameId of gameIds) {
+      const gameDetails = await getGameDetails(gameId, accessToken, platform);
       if (!gameDetails || gameDetails.installers.length === 0) {
         continue;
       }
@@ -719,8 +769,17 @@ async function main() {
         fs.mkdirSync(targetDir, { recursive: true });
 
         // Use the predicted filename for saving and resuming.
-        const fileName = await getPredictedFilename(item, accessToken, targetPlatform);
-        const filePath = path.join(targetDir, fileName);
+        const fileName = await getPredictedFilename(item, accessToken, platform);
+        let filePath = path.join(targetDir, fileName);
+
+        // Older runs may have left a partial file under the API filename before
+        // the completed download was renamed from Content-Disposition.
+        const legacyFileName = item.name.replace(/[/\\?%*:|"<>]/g, '_');
+        const legacyFilePath = path.join(targetDir, legacyFileName);
+        if (!fs.existsSync(filePath) && legacyFileName !== fileName && fs.existsSync(legacyFilePath)) {
+          filePath = legacyFilePath;
+          console.log(`  Found existing partial file under legacy name; resuming ${legacyFileName}.`);
+        }
 
         let retries = 0;
         let downloadSuccess = false;
@@ -737,10 +796,33 @@ async function main() {
               break; // Exit the retry loop for this file.
             }
 
-            const isNetworkError = err.cause && ['ENOTFOUND', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN'].includes(err.cause.code);
+            const networkErrorCodes = [
+              'ABORT_ERR',
+              'ECONNRESET',
+              'EAI_AGAIN',
+              'ENETUNREACH',
+              'ENOTFOUND',
+              'ERR_DOWNLOAD_INCOMPLETE',
+              'ERR_DOWNLOAD_CURL',
+              'ERR_DOWNLOAD_STREAM',
+              'ETIMEDOUT',
+              'UND_ERR_CONNECT_TIMEOUT',
+              'UND_ERR_SOCKET'
+            ];
+            const errorCodes = [
+              err.code,
+              err.cause?.code,
+              err.cause?.cause?.code
+            ];
+            const isNetworkError = errorCodes.some(code => networkErrorCodes.includes(code));
             if (isNetworkError) {
               retries++;
-              console.warn(`\n  Download failed due to network error (${err.message}). Retrying in ${RETRY_DELAY_MS / 1000}s... (${retries}/${MAX_RETRIES})`);
+              const reason = err.code === 'ERR_DOWNLOAD_INCOMPLETE'
+                ? 'Download ended before the expected file length'
+                : err.code === 'ERR_DOWNLOAD_CURL'
+                  ? `Download connection failed (${err.message})`
+                  : `Network error (${err.message})`;
+              console.warn(`\n  ${reason}. Retrying in ${RETRY_DELAY_MS / 1000}s... (${retries}/${MAX_RETRIES})`);
               await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
             } else {
               throw err; // Not a retriable network error, re-throw it
@@ -758,11 +840,12 @@ async function main() {
         saveConfig({
           downloadedGames: {
             ...(config.downloadedGames || {}),
-            [targetPlatform]: platformDownloadedGames
+            [platform]: platformDownloadedGames
           }
         });
         console.log(`[${gameDetails.title}] successfully downloaded and marked as complete.`);
       }
+    }
     }
     if (gamesToDownload > 0) {
       console.log('\nAll downloads complete!');

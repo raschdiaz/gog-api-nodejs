@@ -1,6 +1,6 @@
 # GOG Offline Backup Script
 
-A Node.js command-line script to download your GOG.com game library for offline backup. It provides a range of features to make managing and downloading your games efficient and user-friendly.
+A Node.js command-line script to download your GOG.com game library for offline backup. It provides a range of features to make managing and downloading your games efficient and user-friendly (made with the help of Google Gemini AI and Github Copilot AI).
 
 ## Features
 
@@ -24,7 +24,7 @@ A Node.js command-line script to download your GOG.com game library for offline 
 *   **User-Friendly Configuration:**
     *   **Interactive Setup:** Prompts for the download directory, installer operating system, and filter tags on run.
     *   **Persistent Settings:** Remembers your last-used download directory, installer OS, and tags in `config.json` for convenience.
-    *   **Operating-System Selection:** Lets you choose the GOG installer type to download (`windows`, `mac`, or `linux`) before starting the backup.
+    *   **Operating-System Selection:** Lets you choose the GOG installer type to download (`windows`, `mac`, `linux`, or `all`) before starting the backup.
 
 *   **Detailed Console Output:**
     *   Real-time progress bar for each download, including speed, percentage, and ETA.
@@ -62,8 +62,9 @@ The script supports downloading installers for different operating systems:
 * `windows`
 * `mac`
 * `linux`
+* `all` (downloads each available platform into its own folder)
 
-Pick the one you want before the library scan starts. This is useful if you want to back up installers for a platform different from the current machine.
+Pick one before the library scan starts. Selecting `all` downloads Windows, macOS, and Linux installers in separate platform folders.
 
 ## Configuration Files
 
