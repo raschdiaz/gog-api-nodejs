@@ -1,5 +1,8 @@
 {
   "name": "gog-api-nodejs",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "start": "node ./index.js"
+  }
 }

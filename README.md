@@ -13,6 +13,7 @@ A Node.js command-line script to download your GOG.com game library for offline 
     *   **Linux-Friendly Downloads:** Uses a more robust transfer path on Linux with better retry and resume behavior for large game installer files.
     *   **Resumable Downloads:** Automatically resumes interrupted downloads from where they left off.
     *   **Detects Downloaded Installer Parts:** Tracks each installer part separately, detects parts already present on disk, and skips only those parts when the script runs again.
+    *   **Detects Installer Updates:** Compares each game platform's API modification date with its saved download date and automatically downloads updated installer files.
     *   **Skips Completed Games:** Intelligently checks for existing files and their sizes to skip games that are already fully downloaded.
     *   **Robust Filename Detection:** Ensures correct filenames and extensions by checking API metadata, `Content-Disposition` headers, and download URLs.
     *   **Organized Structure:** Saves each game's installers into a platform-specific folder (e.g., `./gog_offline_backup/windows/The Witcher 3 Wild Hunt/`).
@@ -43,9 +44,14 @@ A Node.js command-line script to download your GOG.com game library for offline 
 
 ## Usage
 
-Run the script from your terminal:
+Run the app with npm:
 ```sh
-node index.js
+npm start
+```
+
+Alternatively, run the script directly:
+```sh
+node ./index.js
 ```
 
 ### First Run
@@ -73,6 +79,6 @@ The script will create a `config.json` file in the same directory. This file sto
 
 *   Your authentication and refresh tokens so you don't have to log in every time. **Do not share this file.**
 *   Your preferred download directory, selected installer OS, and filter tags.
-*   Download completion state grouped by platform under `downloadedGames`, so the same game can be downloaded separately for Windows, macOS, and Linux. Each game stores its completed installer parts in a `parts` array, allowing already downloaded parts to be detected and skipped independently.
+*   Download completion state grouped by platform under `downloadedGames`, so the same game can be downloaded separately for Windows, macOS, and Linux. Each game stores its completed installer parts in a `parts` array and its completion time in `downloadedDate`. The script compares that date with the platform-specific API modification date and redownloads installers when updates are detected.
 
 You can edit this file manually if you wish. On its first run, the script will automatically migrate any old `tokens.json` file into this new format and delete the old file.
