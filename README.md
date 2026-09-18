@@ -35,6 +35,8 @@ A Node.js command-line script to download your GOG.com game library for offline 
 ## Prerequisites
 
 *   Node.js (v18 or later is recommended).
+*   Supported host operating systems: Windows, Linux, and macOS.
+*   Linux and macOS require `curl` to be installed and available in `PATH`.
 
 ## Setup
 
@@ -64,6 +66,9 @@ node ./index.js
 The script will automatically use your saved authentication token. It will prompt you for the download directory, installer OS, and tags, using your previously saved choices as the default.
 
 ### Choosing the Installer OS
+
+The application runs on Windows, Linux, and macOS. The host operating system is independent from the installer platform you choose to download.
+
 The script supports downloading installers for different operating systems:
 
 * `windows`
